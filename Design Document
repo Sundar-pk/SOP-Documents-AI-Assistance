@@ -1,0 +1,196 @@
+🔷 SOP Automation & Conversational Validation System — Refined Design Document (Agent-Ready)
+
+
+📌 Context
+- Organization: Bank operations / middle office.
+- Current state: ~500 SOP documents stored on shared drives and Confluence. Documents are mostly text with some screenshots. No high-sensitivity content.
+- Users: Operations staff (non-programmers), Team Leads, New Joiners, IT/Dev/Ops teams.
+- Available internal LLMs: QWEN (253k token), Llama, Mistral, Gemma, etc., hosted internally.
+- Constraint: All processing must remain inside bank network; no external LLM or cloud usage.
+
+1. Problem statement (What we solve)
+- Fragmented SOP corpus (500 documents) causes inconsistent answers, slow dispute resolution, high onboarding time, and manual validation effort.
+- Goals:
+  - Consolidate SOPs to 3–4 per team (AI-assisted, human-approved).
+  - Provide instant, validated answers to staff queries with citations.
+  - Allow staff to upload documents and validate them against chosen SOP sets/folders.
+  - Maintain auditability, governance, and bank-grade security.
+
+2. Key considerations (Requirements & constraints)
+- Functional
+  - Ingest SOPs from shared drives and Confluence (PDF/DOCX/HTML).
+  - OCR screenshots and extract image text/step screenshots.
+  - Semantic Q&A with source citations and confidence scores.
+  - Upload-and-validate workflow (auto-select SOPs or user-select).
+  - SOP consolidation assistant (cluster, summarize, propose masters).
+  - Role-based access, approval workflows, versioning, audit logs.
+- Non-functional
+  - Latency target: chat responses < 3s median (pilot).
+  - Availability: HA for critical services; backups and retention policy.
+  - Scalability: support growth from 500 → 2000 SOPs.
+  - Security: bank IAM/SSO, encryption (TLS + at-rest), audit trails.
+  - Explainability: responses must include source snippets and provenance.
+- Operational
+  - IT builds and maintains the system; operations staff are end users only.
+  - Start with pilot per team; incrementally onboard other teams.
+- Constraints
+  - No external data egress.
+  - Internal LLMs available; staff have no programming keys.
+
+3. Evaluated architectures (Quick summary)
+- RAG-Based Chatbot (Chosen)
+  - Components: Crawler, Preprocessor & OCR, Chunker, Embedding generator, Vector DB, Retriever, LLM synthesizer, Web UI, Admin console, Audit store.
+  - Strengths: good handling of complex queries, low retrain cost, source-citation, modular.
+- Fine-Tuned LLM with Full Context
+  - Components: Fine-tune LLM on SOP corpus; load consolidated SOPs into context per query.
+  - Strengths: consistent answers; Weaknesses: high compute for retraining, limited by context window growth.
+- Knowledge Graph + Rule-Based System
+  - Components: NLP extraction → Graph DB (Neo4j), rule engine, template responses.
+  - Strengths: deterministic, low hallucination; Weaknesses: heavy manual modeling and maintenance.
+
+4. Final decision (Architecture selected)
+- Selected: RAG-Based Chatbot
+- Why:
+  - Balanced cost, infra, and performance.
+  - Handles complex & novel queries via retrieval + LLM synthesis.
+  - No continuous costly fine-tuning; incremental indexing is sufficient.
+  - Fits internal LLM ecosystem and on-prem constraints.
+- High-level diagram (textual)
+  - Sources (Shared Drive, Confluence) → Crawler → Preprocessing (OCR, metadata) → Chunker → Embedding Generator → Vector DB → Retriever → LLM Orchestrator → API Layer → Web UI (Chat + Validation Workbench) & Admin Console → Audit & Analytics
+
+5. Implementation pattern (Phases, components, APIs, and benefits)
+
+Phase 0 — Planning & Compliance (2–3 weeks)
+- Tasks: define pilot team, success metrics, data access approvals, compliance review, SSO/IAM plan.
+- Deliverables: scope doc, compliance sign-off, sample dataset.
+
+Phase 1 — Ingest & Index (3–4 weeks)
+- Components:
+  - Crawlers: Confluence API connector + file-share crawler.
+  - Preprocessor: format normalization, OCR (Tesseract + vision model), metadata extraction.
+  - Chunker: semantic chunk boundaries, provenance tags (doc id, page, section).
+  - Storage: object store for raw/processed docs.
+  - Embeddings: internal embedding model producing vectors.
+  - Vector DB: ChromaDB/Weaviate/Milvus self-hosted.
+- APIs:
+  - POST /ingest/source {source_type, path, schedule}
+  - GET /ingest/status/{job_id}
+- Benefits:
+  - Incremental updates, reproducible provenance, searchable corpus.
+
+Phase 2 — Retrieval & LLM Integration (3–4 weeks)
+- Components:
+  - Retriever: semantic search + filters (team, date, author).
+  - LLM Orchestrator: prompt templates requiring citations, multi-model fallback (QWEN primary).
+  - Re-ranker & heuristics: boost recency, owner-approved SOPs.
+- Key prompts (examples for agents):
+  - System prompt: "Use provided source snippets. Cite each citation as [doc_id:page:section]. If uncertain, return 'INSUFFICIENT_INFO'."
+  - Validation prompt: "Compare uploaded document fields with SOP rules; output JSON {compliance: bool, issues:[], citations:[]}"
+- APIs:
+  - POST /query {user_id, team, query, context_filters}
+  - POST /validate {user_id, team, file, sop_set}
+  - GET /citations/{response_id}
+- Benefits:
+  - Accurate answers with traceable sources, minimal hallucination.
+
+Phase 3 — UI & Validation Workbench (4–6 weeks)
+- Components:
+  - Chat UI: conversation history, follow-ups, source snippets links.
+  - Validation Workbench: drag/drop file upload, side-by-side comparison, auto-highlight deviations.
+  - Consolidation Assistant: cluster visualization, auto-summaries, side-by-side diffs, approval UI.
+- UX details for agents:
+  - Provide structured response format (JSON + human text).
+  - Actionable outputs: suggested master SOP draft, sections to merge, list of conflicts.
+- Benefits:
+  - Non-technical users can interact naturally; managers approve consolidated SOPs.
+
+Phase 4 — Security, Governance & Testing (2–3 weeks)
+- Activities:
+  - SSO/IAM integration, RBAC, encryption, audit logs, data retention policy.
+  - Model governance: hallucination detection, confidence thresholds, manual review flags.
+  - Penetration tests, privacy review, UAT.
+- Deliverables:
+  - Security plan, audit configuration, risk register.
+
+Phase 5 — Pilot & Rollout (4–6 weeks)
+- Start: one team pilot.
+- Measure: query accuracy, user satisfaction, time-to-resolution, consolidation progress.
+- Iterate: retriever tuning, prompt refinements, onboarding.
+
+6. Data models, APIs, and agent instructions (concise)
+
+Data artifacts
+- Document metadata: {doc_id, title, team, category, source, path, owner, last_updated, version}
+- Chunk record: {chunk_id, doc_id, start_pos, end_pos, text, embedding_vector}
+- Query record: {query_id, user_id, team, timestamp, query_text, retrieved_chunks[], response_text, citations[], confidence}
+- Validation report: {report_id, uploader_id, file_meta, compared_sops[], issues[], score, citations, timestamp}
+
+Core APIs (agent-ready)
+- POST /api/v1/ingest {source, path, schedule, team}
+- POST /api/v1/embeddings/generate {chunk_texts[]}
+- POST /api/v1/query {user, team, query, max_results, filters}
+- POST /api/v1/validate {user, team, file, sop_set}
+- POST /api/v1/consolidate/propose {team, sop_ids[]}
+- POST /api/v1/approve {user, master_sop_id, comments}
+- GET /api/v1/audit/{query_id|report_id}
+
+Agent instructions (for LLMs to start coding)
+- Read this document as system context.
+- Build modular microservices per phase (ingest, embedding, vector-db connector, retriever, llm-orchestrator, ui, admin).
+- Implement APIs as specified; return structured JSON outputs for each endpoint.
+- Enforce prompt templates requiring citations and confidence.
+- Add unit tests and integration tests for ingestion → query → response flows.
+
+7. Prompts & response format examples (for agents to enforce)
+- User query prompt template (system-level):
+  - "You are an operations assistant. Use only the provided source snippets. For each assertion, include citations in the format [doc_id:page:section]. If the answer is not directly supported, state INSufficient_INFO and list next steps."
+- Validation output schema:
+  - {
+      "compliance": boolean,
+      "score": 0..1,
+      "issues": [{"field","expected","found","severity","citations":[]}],
+      "recommendation": "text",
+      "citations": [{"doc_id","section","snippet"}]
+    }
+
+8. Acceptance criteria & success metrics
+- Functional
+  - Chat returns relevant answer with at least one citation for 95% of queries in pilot sample.
+  - Upload-and-validate returns structured report with identified deviations and related citations.
+  - Consolidation assistant proposes master SOPs that a subject-matter expert (SME) accepts ≥70% of time in pilot.
+- Performance & Reliability
+  - Median chat latency < 3s (pilot).
+  - System uptime ≥ 99.5% for core services.
+- Adoption & Business
+  - Time-to-resolution for SOP queries reduced by 50% for pilot team.
+  - New joiner ramp time (first 30 days) reduced by measurable % (baseline vs pilot).
+- Security & Compliance
+  - No data egress; audit logs retained per retention policy.
+  - RBAC enforced for all operations.
+
+9. Minimal MVP feature list (for agent to prioritize)
+- Ingest & index documents from shared drive + Confluence.
+- Embeddings + vector DB setup with basic semantic search.
+- Chat endpoint with LLM orchestration and citation enforcement.
+- Upload-and-validate endpoint with structured report.
+- Simple web UI: chat + file upload + view citations.
+- Audit log for queries and validations.
+- Consolidation assistant (basic clustering + proposed summary).
+
+10. Team, infra & estimated timeline (MVP)
+- Core team: 1 Architect, 2 Backend, 1 Frontend, 1 ML/AI engineer, 1 QA, 1 Product SME
+- Infra: 2 mid-tier servers (API + retrieval), 1 GPU node for inference (use internal LLM infra), self-hosted Vector DB, object storage (MinIO)
+- MVP timeline: ~12–16 weeks (pilot)
+
+11. Risks & mitigations
+- Hallucination risk → enforce citation-first prompts + confidence threshold + manual review for critical answers.
+- Document freshness → incremental indexing + change detection.
+- OCR errors → use hybrid OCR + manual verification for critical images.
+- Knowledge drift → periodic retriever tuning and analytics-driven retraining of embeddings.
+
+12. Next actions for agents / LLMs
+- Step 1: Provision skeleton repos for services (ingest, embeddings, retriever, llm-orchestrator, api, ui).
+- Step 2: Implement ingestion pipelines for a small sample subset (50 SOPs).
+- Step 3: Implement embeddings + vector DB connector + a /query endpoint returning citations.
+- Step 4: Build a simple chat UI to exercise the flow.
+- Step 5: Run pilot, collect logs and tuning metrics, iterate prompts and retrieval parameters.
